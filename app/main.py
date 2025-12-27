@@ -6,6 +6,7 @@ from app.grid import HexGridConfig, HexGridLayout, compute_hex_grid_layout
 
 type Point = tuple[float, float]
 
+
 class HexFold(Sketch):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -21,7 +22,6 @@ class HexFold(Sketch):
         self.window_resizable(True)
         self.frame_rate(60)
         self.no_fill()
-        self.stroke_weight(1)
 
         self._cfg = HexGridConfig.from_env()
         self._layout = None
@@ -32,11 +32,11 @@ class HexFold(Sketch):
         self._ensure_layout()
 
         self.background(245)
-        self.stroke(40)
-
         assert self._layout is not None
-        for cx, cy in self._layout.centers:
-            self._draw_hexagon(cx, cy, self._layout.vertex_offsets)
+        assert self._cfg is not None
+
+        if self._cfg.debug:
+            self._draw_debug(self._layout)
 
     def _ensure_layout(self) -> None:
         """Update cached layout if the window size changed."""
@@ -48,21 +48,39 @@ class HexFold(Sketch):
         self._layout = compute_hex_grid_layout(self.width, self.height, self._cfg)
         self._last_size = size
 
-    def _draw_hexagon(self, cx: float, cy: float, vertex_offsets: tuple[Point, ...]) -> None:
-        """Draw a hexagon at (cx, cy) using precomputed vertex offsets.
+    def _draw_debug(self, layout: HexGridLayout) -> None:
+        """Draw debug overlays: vertices and sparse axial labels.
 
         Args:
-            cx: Center x-coordinate in pixels.
-            cy: Center y-coordinate in pixels.
-            vertex_offsets: (dx, dy) offsets for the 6 vertices.
+            layout: Precomputed layout.
 
         Returns:
             None.
         """
-        self.begin_shape()
-        for dx, dy in vertex_offsets:
-            self.vertex(cx + dx, cy + dy)
-        self.end_shape(self.CLOSE)
+        # Vertices
+        self.no_stroke()
+        self.fill(255, 0, 0, 90)
+        for v in layout.vertices:
+            self.circle(v.px[0], v.px[1], 6)
+        self.no_fill()
+
+        # Sparse labels
+        self.no_stroke()
+        self.fill(0, 70)
+        self.text_size(9)
+        self.text_align(self.LEFT, self.TOP)
+        for v in layout.vertices:
+            if (v.q % 2 == 0) and (v.r % 2 == 0):
+                self.text(f"({v.q},{v.r})", v.px[0] + 3, v.px[1] + 3)
+
+        # Draw honeycomb edges
+        self.stroke(40, 40)
+        self.stroke_weight(1)
+        for e in layout.edges:
+            a_px, b_px = e.endpoints_px(layout.vertices_by_key)
+            self.line(a_px[0], a_px[1], b_px[0], b_px[1])
+
+        self.no_fill()
 
 
 app = HexFold()
