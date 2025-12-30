@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import random
+
 from py5 import Sketch
 
+from app.graph.graph_renderer import GraphRenderer
+from app.graph.growth_stepper import Agent, GrowthStepper
+from app.graph.honey_graph import HoneyGraph
 from app.grid import HexGridConfig, HexGridLayout, compute_hex_grid_layout
 
 type Point = tuple[float, float]
@@ -10,8 +15,12 @@ type Point = tuple[float, float]
 class HexFold(Sketch):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._stepper = None
+        self._agent = None
+        self._renderer = None
         self._cfg: HexGridConfig | None = None
         self._layout: HexGridLayout | None = None
+        self._graph: HoneyGraph | None = None
         self._last_size: tuple[int, int] = (-1, -1)
 
     def settings(self) -> None:
@@ -27,11 +36,23 @@ class HexFold(Sketch):
         self._layout = None
         self._last_size = (-1, -1)
 
+        self._graph = None
+        self._renderer = GraphRenderer()
+        self._agent = Agent()
+        self._stepper = GrowthStepper(random.Random())
+
     def draw(self) -> None:
         """Redraw the honeycomb each frame and rebuild layout on resize."""
         self._ensure_layout()
 
+        if self._graph is None:
+            self._graph = HoneyGraph(self._layout)
+
+        self._stepper.step(self._agent, self._layout, self._graph)
+
         self.background(245)
+        self._renderer.draw_active_edges(self, self._layout, self._graph)
+
         assert self._layout is not None
         assert self._cfg is not None
 
@@ -47,6 +68,7 @@ class HexFold(Sketch):
         assert self._cfg is not None
         self._layout = compute_hex_grid_layout(self.width, self.height, self._cfg)
         self._last_size = size
+        self._graph: HoneyGraph = HoneyGraph(self._layout)
 
     def _draw_debug(self, layout: HexGridLayout) -> None:
         """Draw debug overlays: vertices and sparse axial labels.
@@ -67,7 +89,7 @@ class HexFold(Sketch):
         # Sparse labels
         self.no_stroke()
         self.fill(0, 70)
-        self.text_size(9)
+        self.text_size(11)
         self.text_align(self.LEFT, self.TOP)
         for v in layout.vertices:
             if (v.q % 2 == 0) and (v.r % 2 == 0):
