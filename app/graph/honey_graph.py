@@ -12,6 +12,7 @@ class VertexState:
     """Mutable per-vertex state used by the simulation."""
     visit_count: int = 0
     version: int = 0
+    open_incident_edges: int = 0
 
 
 @dataclass(slots=True)
@@ -29,9 +30,6 @@ class HoneyGraph:
 
         Args:
             layout: Layout containing vertices, edges, and vertex->pixel mapping.
-
-        Returns:
-            None.
         """
         self._vertices_by_key: Mapping[VertexKey, object] = layout.vertices_by_key
         self._adjacency: Dict[VertexKey, list[VertexKey]] = {k: [] for k in layout.vertices_by_key.keys()}
@@ -51,6 +49,13 @@ class HoneyGraph:
             v: tuple(ns) for v, ns in self._adjacency.items()
         }
 
+        self._frontier_count = 0
+        for vertex, ns in self._adjacency_ro.items():
+            state: VertexState = self._vertex_state[vertex]
+            state.open_incident_edges = len(ns)
+            if state.open_incident_edges > 0:
+                self._frontier_count += 1
+
     def neighbors(self, vertex_key: VertexKey) -> Tuple[VertexKey, ...]:
         """Return the neighbors of a vertex.
 
@@ -61,6 +66,40 @@ class HoneyGraph:
             Tuple of neighboring vertex keys.
         """
         return self._adjacency_ro[vertex_key]
+
+    def iter_existing_neighbors(self, vertex_key: VertexKey) -> Iterable[VertexKey]:
+        """Iterate over neighbors connected via existing edges only.
+
+        This is the traversal graph for BFS in travel mode.
+
+        Args:
+            vertex_key: Vertex key to iterate from.
+
+        Yields:
+            Neighbor vertex keys reachable via edges with exists=True.
+        """
+        for nb in self._adjacency_ro[vertex_key]:
+            if self._edge_state[self._edge_key(vertex_key, nb)].exists:
+                yield nb
+
+    def is_frontier_vertex(self, vertex_key: VertexKey) -> bool:
+        """Return whether a vertex is currently part of the frontier.
+
+        Args:
+            vertex_key: Vertex key to query.
+
+        Returns:
+            True if the vertex has at least one missing incident edge, otherwise False.
+        """
+        return self._vertex_state[vertex_key].open_incident_edges > 0
+
+    def frontier_is_empty(self) -> bool:
+        """Return whether the frontier is empty.
+
+        Returns:
+            True if there is no frontier vertex left, otherwise False.
+        """
+        return self._frontier_count == 0
 
     def vertex_state(self, vertex_key: VertexKey) -> VertexState:
         """Return mutable vertex state.
@@ -96,19 +135,23 @@ class HoneyGraph:
     def ensure_edge_exists(self, key_a: VertexKey, key_b: VertexKey) -> None:
         """Mark an edge as existing and track it as active.
 
+        Also updates frontier counters and increments vertex versions when a vertex
+        stops being part of the frontier.
+
         Args:
             key_a: First endpoint key.
             key_b: Second endpoint key.
-
-        Returns:
-            None.
         """
-        key: EdgeKey = self._edge_key(key_a, key_b)
-        state: EdgeState = self._edge_state[key]
+        key = self._edge_key(key_a, key_b)
+        state = self._edge_state[key]
         if state.exists:
             return
+
         state.exists = True
         self._active_edges.add(key)
+
+        self._decrement_open_incident_edges(key_a)
+        self._decrement_open_incident_edges(key_b)
 
     def choose_random_start_edge(self, rng: random.Random) -> tuple[VertexKey, VertexKey]:
         """Pick a random directed start edge (A -> B).
@@ -126,6 +169,22 @@ class HoneyGraph:
             if neighbors:
                 key_a = rng.choice(neighbors)
                 return (key_a, key_b)
+
+    def _decrement_open_incident_edges(self, vertex_key: VertexKey) -> None:
+        """Decrease the missing-edge counter for a vertex and close frontier if it hits zero.
+
+        Args:
+            vertex_key: Vertex key to update.
+        """
+        state = self._vertex_state[vertex_key]
+        if state.open_incident_edges <= 0:
+            return
+
+        state.open_incident_edges -= 1
+
+        if state.open_incident_edges == 0:
+            state.version += 1
+            self._frontier_count -= 1
 
     @staticmethod
     def _edge_key(key_a: VertexKey, key_b: VertexKey) -> EdgeKey:
