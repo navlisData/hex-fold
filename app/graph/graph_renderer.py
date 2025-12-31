@@ -7,7 +7,6 @@ from app.grid.layout import HexGridLayout
 
 
 class _StrokeSketch(Protocol):
-    """Minimal sketch protocol for drawing operations used by the renderer."""
     def stroke(self, *args) -> None: ...
     def stroke_weight(self, weight: float) -> None: ...
     def line(self, x1: float, y1: float, x2: float, y2: float) -> None: ...
@@ -23,9 +22,6 @@ class GraphRenderer:
             sketch: The py5 sketch (or compatible protocol).
             layout: Provides vertex key -> pixel coordinate mapping.
             graph: Provides which edges exist and their traffic values.
-
-        Returns:
-            None.
         """
         sketch.stroke(40,40)
 
