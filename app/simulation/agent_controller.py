@@ -5,10 +5,10 @@ from enum import Enum, auto
 
 from py5 import lerp
 
+from app.config import SimulationTimingConfig
 from app.graph.growth_stepper import Agent, AgentMode, GrowthStepper
 from app.graph.honey_graph import HoneyGraph
 from app.grid.layout import HexGridLayout, Point, VertexKey
-from app.simulation.timing_config import SimulationTimingConfig
 
 
 class _AnimPhase(Enum):

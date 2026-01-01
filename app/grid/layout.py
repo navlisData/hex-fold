@@ -5,7 +5,7 @@ from math import sqrt
 from types import MappingProxyType
 from typing import Dict, Iterable, Mapping
 
-from .config import HexGridConfig
+from app.config import HexGridConfig
 
 type Point = tuple[float, float]
 type VertexKey = tuple[int, int]
