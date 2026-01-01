@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Iterable, Mapping, Set, Tuple
 import random
+from dataclasses import dataclass
+from typing import Dict, Iterable, Mapping, Set
 
 from app.grid.layout import EdgeKey, HexGridLayout, VertexKey
 
@@ -45,7 +45,7 @@ class HoneyGraph:
             self._adjacency[b].append(a)
             self._edge_state[self._edge_key(a, b)] = EdgeState(exists=False, traffic=0)
 
-        self._adjacency_ro: Dict[VertexKey, Tuple[VertexKey, ...]] = {
+        self._adjacency_ro: Dict[VertexKey, tuple[VertexKey, ...]] = {
             v: tuple(ns) for v, ns in self._adjacency.items()
         }
 
@@ -56,7 +56,7 @@ class HoneyGraph:
             if state.open_incident_edges > 0:
                 self._frontier_count += 1
 
-    def neighbors(self, vertex_key: VertexKey) -> Tuple[VertexKey, ...]:
+    def neighbors(self, vertex_key: VertexKey) -> tuple[VertexKey, ...]:
         """Return the neighbors of a vertex.
 
         Args:

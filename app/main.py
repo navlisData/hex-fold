@@ -1,27 +1,29 @@
 from __future__ import annotations
 
 import random
+import app.rendering as rendering
 
 from py5 import Sketch
 
-from app.graph.graph_renderer import GraphRenderer
 from app.graph.growth_stepper import Agent, GrowthStepper
 from app.graph.honey_graph import HoneyGraph
 from app.grid import HexGridConfig, HexGridLayout, compute_hex_grid_layout
-
-type Point = tuple[float, float]
+from app.simulation.agent_controller import AgentController
+from app.simulation.timing_config import SimulationTimingConfig
 
 
 class HexFold(Sketch):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._stepper = None
-        self._agent = None
-        self._renderer = None
+
         self._cfg: HexGridConfig | None = None
+        self._timing: SimulationTimingConfig | None = None
         self._layout: HexGridLayout | None = None
         self._graph: HoneyGraph | None = None
         self._last_size: tuple[int, int] = (-1, -1)
+
+        self._rng = random.Random()
+        self._controller: AgentController | None = None
 
     def settings(self) -> None:
         self.size(600, 200, self.P2D)
@@ -33,51 +35,54 @@ class HexFold(Sketch):
         self.no_fill()
 
         self._cfg = HexGridConfig.from_env()
+        self._timing = SimulationTimingConfig.from_env()
+
         self._layout = None
+        self._graph = None
+        self._controller = None
         self._last_size = (-1, -1)
 
-        self._graph = None
-        self._renderer = GraphRenderer()
-        self._agent = Agent()
-        self._stepper = GrowthStepper(random.Random())
-
     def draw(self) -> None:
-        """Redraw the honeycomb each frame and rebuild layout on resize."""
-        self._ensure_layout()
-
-        if self._graph is None:
-            self._graph = HoneyGraph(self._layout)
-
-        self._stepper.step(self._agent, self._layout, self._graph)
-
-        self.background(245)
-        self._renderer.draw_active_edges(self, self._layout, self._graph)
+        """Redraw the honeycomb each frame and animate agents time-based."""
+        self._ensure_layout_and_sim()
 
         assert self._layout is not None
+        assert self._graph is not None
+        assert self._controller is not None
         assert self._cfg is not None
+
+        now_ms = int(self.millis())
+        self._controller.update(now_ms, self._layout, self._graph)
+
+        self.background(245)
+        rendering.draw_active_edges(self, self._layout, self._graph)
+        rendering.draw_agents(self, self._layout, self._controller.get_drawables())
 
         if self._cfg.debug:
             self._draw_debug(self._layout)
 
-    def _ensure_layout(self) -> None:
-        """Update cached layout if the window size changed."""
+    def _ensure_layout_and_sim(self) -> None:
+        """Rebuild layout+graph on resize and reset the simulation accordingly."""
         size = (self.width, self.height)
-        if size == self._last_size and self._layout is not None:
+        if size == self._last_size and self._layout is not None and self._graph is not None and self._controller is not None:
             return
 
         assert self._cfg is not None
+        assert self._timing is not None
+
         self._layout = compute_hex_grid_layout(self.width, self.height, self._cfg)
+        self._graph = HoneyGraph(self._layout)
         self._last_size = size
-        self._graph: HoneyGraph = HoneyGraph(self._layout)
+
+        stepper = GrowthStepper(self._rng)
+        self._controller = AgentController(stepper=stepper, timing=self._timing)
+        self._controller.add_agent(Agent())
 
     def _draw_debug(self, layout: HexGridLayout) -> None:
         """Draw debug overlays: vertices and sparse axial labels.
 
         Args:
             layout: Precomputed layout.
-
-        Returns:
-            None.
         """
         # Vertices
         self.no_stroke()
