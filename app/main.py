@@ -59,7 +59,7 @@ class HexFold(Sketch):
         rendering.draw_agents(self, self._layout, self._controller.get_drawables())
 
         if self._cfg.debug:
-            self._draw_debug(self._layout)
+            rendering.draw_debug_overlays(self, self._layout)
 
     def _ensure_layout_and_sim(self) -> None:
         """Rebuild layout+graph on resize and reset the simulation accordingly."""
@@ -77,37 +77,6 @@ class HexFold(Sketch):
         stepper = GrowthStepper(self._rng)
         self._controller = AgentController(stepper=stepper, timing=self._timing)
         self._controller.add_agent(Agent())
-
-    def _draw_debug(self, layout: HexGridLayout) -> None:
-        """Draw debug overlays: vertices and sparse axial labels.
-
-        Args:
-            layout: Precomputed layout.
-        """
-        # Vertices
-        self.no_stroke()
-        self.fill(255, 0, 0, 90)
-        for v in layout.vertices:
-            self.circle(v.px[0], v.px[1], 6)
-        self.no_fill()
-
-        # Sparse labels
-        self.no_stroke()
-        self.fill(0, 70)
-        self.text_size(11)
-        self.text_align(self.LEFT, self.TOP)
-        for v in layout.vertices:
-            if (v.q % 2 == 0) and (v.r % 2 == 0):
-                self.text(f"({v.q},{v.r})", v.px[0] + 3, v.px[1] + 3)
-
-        # Draw honeycomb edges
-        self.stroke(40, 40)
-        self.stroke_weight(1)
-        for e in layout.edges:
-            a_px, b_px = e.endpoints_px(layout.vertices_by_key)
-            self.line(a_px[0], a_px[1], b_px[0], b_px[1])
-
-        self.no_fill()
 
 
 app = HexFold()
