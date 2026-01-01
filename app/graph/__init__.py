@@ -1,5 +1,4 @@
-from .graph_renderer import GraphRenderer
-from .growth_stepper import Agent, GrowthStepper
+from .growth_stepper import Agent, GrowthStepper, AgentMode
 from .honey_graph import HoneyGraph
 
-__all__ = ["HoneyGraph", "GraphRenderer", "Agent", "GrowthStepper"]
+__all__ = ["HoneyGraph", "Agent", "AgentMode", "GrowthStepper"]
