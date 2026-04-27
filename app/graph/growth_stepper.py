@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -27,51 +28,88 @@ class Agent:
     travel_target_version: int = -1
     travel_path: deque[VertexKey] = field(default_factory=deque)
 
+    arrived_in_grow: bool = False
+    fork_cooldown: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class SpawnMove:
+    """Spawn instruction for a new agent including its first already-applied move.
+
+    Attributes:
+        agent: Spawned agent after the move was applied in the simulation.
+        from_key: Start vertex of the spawned move (for animation).
+        to_key: End vertex of the spawned move (for animation).
+    """
+    agent: Agent
+    from_key: VertexKey
+    to_key: VertexKey
+
 
 class GrowthStepper:
     """Advance an agent by one decision using 'prefer new edge' and BFS-based travel."""
 
-    def __init__(self, rng: random.Random, prefer_new_probability: float = 0.85) -> None:
+    def __init__(
+        self,
+        rng: random.Random,
+        prefer_new_probability: float = 0.85,
+        fork_growth_factor: float = 1.7,
+        fork_jitter: int = 1,
+        fork_cooldown_steps: int = 6,
+        min_first_fork_at: int = 4,
+    ) -> None:
         """Create a stepper.
 
         Args:
             rng: Random number generator.
             prefer_new_probability: Probability to choose the new edge when exactly one candidate is new.
+            fork_growth_factor: Multiplier for per-vertex next_fork_at after each fork.
+            fork_jitter: Random additive jitter applied to next_fork_at updates.
+            fork_cooldown_steps: Per-agent cooldown after a fork to prevent rapid consecutive spawns.
+            min_first_fork_at: Lower bound for the initial next_fork_at value per vertex.
         """
         self._rng = rng
         self._prefer_new_probability = max(0.0, min(1.0, prefer_new_probability))
 
-    def step(self, agent: Agent, layout: HexGridLayout, graph: HoneyGraph) -> None:
-        """Perform one simulation step.
+        self._fork_growth_factor = max(1.01, fork_growth_factor)
+        self._fork_jitter = max(0, fork_jitter)
+        self._fork_cooldown_steps = max(0, fork_cooldown_steps)
+        self._min_first_fork_at = max(2, min_first_fork_at)
 
-        Growth mode:
-          - Computes forward options and chooses next by preferring a new edge.
-          - If locally blocked, switches to travel mode.
-
-        Travel mode:
-          - Plans a BFS route to the nearest frontier vertex (on existing edges).
-          - Traverses one edge per step, still increasing traffic and visit_count.
-          - Soft-cancels the route if the target's version changes.
+    def step(
+        self,
+        agent: Agent,
+        layout: HexGridLayout,
+        graph: HoneyGraph
+    ) -> tuple["SpawnMove", ...]:
+        """Perform one simulation step and return any spawn moves.
 
         Args:
             agent: Agent state to mutate.
             layout: Layout for pixel-based left/right ordering.
-            graph: Graph state for edge existence, traffic and frontier membership.
+            graph: Graph state for edge existence, traffic, and frontier membership.
+
+        Returns:
+            SpawnMove instructions for newly created agents, or an empty tuple if none were created.
         """
         if graph.frontier_is_empty():
-            return
+            return ()
+
+        if agent.fork_cooldown > 0:
+            agent.fork_cooldown -= 1
 
         if agent.prev is None or agent.curr is None:
             self._initialize_agent(agent, graph)
-            return
+            return ()
 
         if agent.mode == AgentMode.GROW:
-            progressed = self._step_grow(agent, layout, graph)
-            if progressed:
-                return
+            spawns = self._step_grow(agent, layout, graph)
+            if spawns is not None:
+                return spawns
             self._enter_travel_mode(agent)
 
         self._step_travel(agent, graph)
+        return ()
 
     def _initialize_agent(self, agent: Agent, graph: HoneyGraph) -> None:
         """Initialize the agent on a random directed start edge.
@@ -81,16 +119,16 @@ class GrowthStepper:
             graph: Graph state for choosing and activating the start edge.
         """
         a, b = graph.choose_random_start_edge(self._rng)
-        graph.ensure_edge_exists(a, b)
-        graph.edge_state(a, b).traffic += 1
-        graph.vertex_state(b).visit_count += 1
-
-        agent.prev, agent.curr = a, b
-        agent.mode = AgentMode.GROW
+        self._apply_grow_traverse(agent, from_vertex=a, to_vertex=b, graph=graph)
         self._clear_travel_plan(agent)
 
-    def _step_grow(self, agent: Agent, layout: HexGridLayout, graph: HoneyGraph) -> bool:
-        """Try to perform one growth step.
+    def _step_grow(
+        self,
+        agent: Agent,
+        layout: HexGridLayout,
+        graph: HoneyGraph
+    ) -> tuple["SpawnMove", ...] | None:
+        """Try to perform one growth step and optionally fork.
 
         Args:
             agent: Agent state to mutate.
@@ -98,7 +136,7 @@ class GrowthStepper:
             graph: Graph state.
 
         Returns:
-            True if a growth move was performed, otherwise False.
+            A tuple of SpawnMove instructions if a growth move was performed, or None if blocked.
         """
         assert agent.prev is not None
         assert agent.curr is not None
@@ -109,18 +147,58 @@ class GrowthStepper:
         left, right = GrowthStepper._forward_options_left_right(prev, curr, layout, graph)
         candidates = [vertex for vertex in (left, right) if vertex is not None]
         if not candidates:
-            return False
+            return None
+
+        if (
+            len(candidates) == 2
+            and left is not None
+            and right is not None
+            and self._should_fork_here(agent, curr, left, right, graph)
+        ):
+            primary = self._choose_primary_for_fork(curr, left, right, graph)
+            secondary = right if primary == left else left
+
+            self._apply_grow_traverse(agent, from_vertex=curr, to_vertex=primary, graph=graph)
+
+            spawned_agent = Agent(mode=AgentMode.GROW)
+            self._apply_grow_traverse(spawned_agent, from_vertex=curr, to_vertex=secondary, graph=graph)
+
+            self._commit_vertex_fork(curr, graph)
+            agent.fork_cooldown = self._fork_cooldown_steps
+            spawned_agent.fork_cooldown = self._fork_cooldown_steps
+
+            return (SpawnMove(agent=spawned_agent, from_key=curr, to_key=secondary),)
 
         next_vertex = self._choose_next(curr, candidates, graph)
         if next_vertex is None:
-            return False
+            return None
 
-        graph.ensure_edge_exists(curr, next_vertex)
-        graph.edge_state(curr, next_vertex).traffic += 1
-        graph.vertex_state(next_vertex).visit_count += 1
+        self._apply_grow_traverse(agent, from_vertex=curr, to_vertex=next_vertex, graph=graph)
+        return ()
 
-        agent.prev, agent.curr = curr, next_vertex
-        return True
+    def _apply_grow_traverse(self, agent: Agent, from_vertex: VertexKey, to_vertex: VertexKey, graph: HoneyGraph) -> None:
+        """Apply a traversal in growth mode and update all counters.
+
+        Args:
+            agent: Agent state to mutate.
+            from_vertex: Start vertex of the traversal.
+            to_vertex: End vertex of the traversal.
+            graph: Graph state to update.
+        """
+        graph.ensure_edge_exists(from_vertex, to_vertex)
+        graph.edge_state(from_vertex, to_vertex).traffic += 1
+
+        vs = graph.vertex_state(to_vertex)
+        vs.visit_count += 1
+        vs.grow_visit_count += 1
+
+        if vs.next_fork_at < self._min_first_fork_at:
+            # Initialize lazily for old graphs that do not set next_fork_at at creation time.
+            vs.next_fork_at = self._min_first_fork_at
+
+        agent.prev, agent.curr = from_vertex, to_vertex
+        agent.mode = AgentMode.GROW
+        agent.arrived_in_grow = True
 
     def _step_travel(self, agent: Agent, graph: HoneyGraph) -> None:
         """Perform one travel step (plan route if needed, then traverse one edge).
@@ -241,6 +319,21 @@ class GrowthStepper:
         reversed_path_vertices.reverse()
         return deque(reversed_path_vertices)
 
+    def _apply_travel_traverse(self, agent: Agent, from_vertex: VertexKey, to_vertex: VertexKey, graph: HoneyGraph) -> None:
+        """Apply a traversal in travel mode and update counters.
+
+        Args:
+            agent: Agent state to mutate.
+            from_vertex: Start vertex of the traversal.
+            to_vertex: End vertex of the traversal.
+            graph: Graph state to update.
+        """
+        graph.edge_state(from_vertex, to_vertex).traffic += 1
+        graph.vertex_state(to_vertex).visit_count += 1
+
+        agent.prev, agent.curr = from_vertex, to_vertex
+        agent.arrived_in_grow = False
+
     def _traverse_one_travel_edge(self, agent: Agent, graph: HoneyGraph) -> None:
         """Traverse exactly one edge along the preplanned travel path.
 
@@ -253,11 +346,7 @@ class GrowthStepper:
             return
 
         next_vertex = agent.travel_path.popleft()
-
-        graph.edge_state(agent.curr, next_vertex).traffic += 1
-        graph.vertex_state(next_vertex).visit_count += 1
-
-        agent.prev, agent.curr = agent.curr, next_vertex
+        self._apply_travel_traverse(agent, from_vertex=agent.curr, to_vertex=next_vertex, graph=graph)
 
     def _enter_travel_mode(self, agent: Agent) -> None:
         """Switch the agent into travel mode and reset any existing travel plan.
@@ -266,6 +355,7 @@ class GrowthStepper:
             agent: Agent state to mutate.
         """
         agent.mode = AgentMode.TRAVEL
+        agent.arrived_in_grow = False
         self._clear_travel_plan(agent)
 
     @staticmethod
@@ -278,6 +368,117 @@ class GrowthStepper:
         agent.travel_target = None
         agent.travel_target_version = -1
         agent.travel_path.clear()
+
+    def _should_fork_here(
+        self,
+        agent: Agent,
+        vertex: VertexKey,
+        left: VertexKey,
+        right: VertexKey,
+        graph: HoneyGraph
+    ) -> bool:
+        """Return whether a fork should be triggered at the given vertex.
+
+        Rules:
+          - Only on GROW arrival.
+          - Requires growth potential, meaning at least one forward edge is new.
+          - Uses per-vertex scheduling via next_fork_at driven by grow_visit_count.
+          - Respects per-agent cooldown to avoid rapid consecutive forks by the same agent.
+
+        Args:
+            agent: Current agent.
+            vertex: Vertex to evaluate.
+            left: Left forward option.
+            right: Right forward option.
+            graph: Graph state.
+
+        Returns:
+            True if a fork should be triggered here, otherwise False.
+        """
+        if agent.mode != AgentMode.GROW or not agent.arrived_in_grow:
+            return False
+        if agent.fork_cooldown > 0:
+            return False
+
+        if not self._has_growth_potential(vertex, left, right, graph):
+            return False
+
+        vs = graph.vertex_state(vertex)
+        if vs.grow_visit_count < vs.next_fork_at:
+            return False
+
+        return True
+
+    def _has_growth_potential(self, curr: VertexKey, left: VertexKey, right: VertexKey, graph: HoneyGraph) -> bool:
+        """Check whether forking can create at least one new edge.
+
+        Args:
+            curr: Current vertex.
+            left: Left candidate.
+            right: Right candidate.
+            graph: Graph state.
+
+        Returns:
+            True if at least one of the two forward edges does not yet exist.
+        """
+        return (not graph.edge_state(curr, left).exists) or (not graph.edge_state(curr, right).exists)
+
+    def _commit_vertex_fork(self, vertex: VertexKey, graph: HoneyGraph) -> None:
+        """Update per-vertex scheduling state after a fork.
+
+        Args:
+            vertex: Vertex where the fork happened.
+            graph: Graph state to update.
+        """
+        vs = graph.vertex_state(vertex)
+        vs.fork_count += 1
+
+        base_next = max(vs.next_fork_at, self._min_first_fork_at)
+        grown = int(math.ceil(base_next * self._fork_growth_factor))
+        jitter = self._rng.randint(0, self._fork_jitter) if self._fork_jitter > 0 else 0
+        vs.next_fork_at = grown + jitter
+
+    # @staticmethod
+    # def _is_power_of_two_ge_2(value: int) -> bool:
+    #     """Return True if value is a power of two and >= 2.
+    #
+    #     Args:
+    #         value: Value to check.
+    #
+    #     Returns:
+    #         True if value is a power of two and >= 2, otherwise False.
+    #     """
+    #     return value >= 2 and (value & (value - 1)) == 0
+
+    def _choose_primary_for_fork(
+        self,
+        curr: VertexKey,
+        left: VertexKey,
+        right: VertexKey,
+        graph: HoneyGraph,
+    ) -> VertexKey:
+        """Choose which branch the current agent takes during a fork.
+
+        This keeps 'prefer new edge' semantics for the primary branch while the spawned
+        agent takes the other branch.
+
+        Args:
+            curr: Current vertex where the fork occurs.
+            left: Left forward option.
+            right: Right forward option.
+            graph: Graph state.
+
+        Returns:
+            The chosen primary vertex (left or right).
+        """
+        e_left_new = not graph.edge_state(curr, left).exists
+        e_right_new = not graph.edge_state(curr, right).exists
+
+        if e_left_new and not e_right_new:
+            return left if self._rng.random() < self._prefer_new_probability else right
+        if e_right_new and not e_left_new:
+            return right if self._rng.random() < self._prefer_new_probability else left
+        return left if self._rng.random() < 0.5 else right
 
     def _choose_next(self, curr: VertexKey, candidates: list[VertexKey], graph: HoneyGraph) -> VertexKey | None:
         """Choose the next vertex by preferring non-existing edges.

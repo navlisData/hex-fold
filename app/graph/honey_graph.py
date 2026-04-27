@@ -14,6 +14,9 @@ class VertexState:
     version: int = 0
     open_incident_edges: int = 0
 
+    grow_visit_count: int = 0
+    next_fork_at: int = 4
+    fork_count: int = 0
 
 @dataclass(slots=True)
 class EdgeState:
