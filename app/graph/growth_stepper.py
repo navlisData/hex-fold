@@ -54,7 +54,7 @@ class GrowthStepper:
             self,
             rng: random.Random,
             prefer_new_probability: float = 0.85,
-            fork_cooldown_steps: int = 2,
+            fork_cooldown_steps: int = 0,
             min_growth_steps_before_fork: int = 5,
             fork_agent_exclusion_radius: int = 10,
             max_nearby_agents_for_fork: int | None = 0,
