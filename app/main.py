@@ -86,7 +86,12 @@ class HexFold(Sketch):
         self._graph = HoneyGraph(self._layout)
         self._last_size = size
 
-        stepper = GrowthStepper(self._rng)
+        stepper = GrowthStepper(
+            rng=self._rng,
+            min_growth_steps_before_fork=self._sim_cfg.steps_before_fork,
+            fork_agent_exclusion_radius=self._sim_cfg.fork_agent_exclude_radius,
+            max_nearby_agents_for_fork=self._sim_cfg.max_nearby_agents,
+        )
         self._controller = AgentController(stepper=stepper, timing=self._timing_cfg)
         self._controller.add_agent(Agent())
 
