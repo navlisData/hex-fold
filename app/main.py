@@ -62,13 +62,18 @@ class HexFold(Sketch):
         assert self._graph is not None
         assert self._controller is not None
         assert self._grid_cfg is not None
+        assert self._sim_cfg is not None
 
         now_ms = int(self.millis())
         self._controller.update(now_ms, self._layout, self._graph)
 
         self.background(245)
         rendering.draw_active_edges(self, self._layout, self._graph)
-        rendering.draw_agents(self, self._layout, self._controller.get_drawables())
+        rendering.draw_agents(
+            self,
+            self._layout,
+            self._controller.get_drawables(self._sim_cfg.steps_before_fork),
+        )
 
         if self._grid_cfg.debug:
             rendering.draw_debug_overlays(self, self._layout)

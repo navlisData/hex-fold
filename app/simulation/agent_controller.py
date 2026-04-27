@@ -19,12 +19,17 @@ class _AnimPhase(Enum):
     DWELLING = auto()
     STOPPED = auto()
 
+class AgentVisualState(Enum):
+    GROWING = auto()
+    FORK_READY = auto()
+    TRAVELING = auto()
 
 @dataclass(frozen=True, slots=True)
 class AgentDrawable:
     """Render-ready agent state."""
     px: Point
-    mode: AgentMode
+    visual_state: AgentVisualState
+    growth_progress: float
 
 
 @dataclass(slots=True)
@@ -321,13 +326,86 @@ class AgentController:
         )
         self._runtimes.append(AgentRuntime(agent=spawn.agent, animator=animator))
 
-    def get_drawables(self) -> tuple[AgentDrawable, ...]:
+    def get_drawables(self, steps_before_fork: int) -> tuple[AgentDrawable, ...]:
         """Return render-ready agent states.
+
+        Args:
+            steps_before_fork: Step count that maps an agent to full visual growth progress.
 
         Returns:
             Tuple of AgentDrawable objects.
         """
         return tuple(
-            AgentDrawable(px=runtime.animator.position_px(), mode=runtime.agent.mode)
+            self._to_drawable(
+                runtime=runtime,
+                steps_before_fork=steps_before_fork,
+            )
             for runtime in self._runtimes
         )
+
+    @staticmethod
+    def _to_drawable(
+            runtime: AgentRuntime,
+            steps_before_fork: int,
+    ) -> AgentDrawable:
+        """Convert an agent runtime into a render-ready drawable.
+
+        Args:
+            runtime: Runtime container holding simulation and animation state.
+            steps_before_fork: Step count that maps an agent to full visual growth progress.
+
+        Returns:
+            Render-ready agent drawable.
+        """
+        growth_progress = _normalize_growth_progress(
+            growth_steps_since_fork=runtime.agent.growth_steps_since_fork,
+            steps_before_fork=steps_before_fork,
+        )
+
+        return AgentDrawable(
+            px=runtime.animator.position_px(),
+            visual_state=_resolve_agent_visual_state(
+                mode=runtime.agent.mode,
+                growth_progress=growth_progress,
+            ),
+            growth_progress=growth_progress,
+        )
+
+def _resolve_agent_visual_state(
+    mode: AgentMode,
+    growth_progress: float,
+) -> AgentVisualState:
+    """Resolve the visual state for an agent.
+
+    Args:
+        mode: Current simulation mode of the agent.
+        growth_progress: Normalized growth progress between 0.0 and 1.0.
+
+    Returns:
+        Visual state used by the renderer.
+    """
+    if mode is AgentMode.TRAVEL:
+        return AgentVisualState.TRAVELING
+
+    if growth_progress >= 1.0:
+        return AgentVisualState.FORK_READY
+
+    return AgentVisualState.GROWING
+
+def _normalize_growth_progress(
+    growth_steps_since_fork: int,
+    steps_before_fork: int,
+) -> float:
+    """Normalize growth progress to the range from 0.0 to 1.0.
+
+    Args:
+        growth_steps_since_fork: Number of growth steps since the agent last forked.
+        steps_before_fork: Step count that represents full progress.
+
+    Returns:
+        Clamped growth progress between 0.0 and 1.0.
+    """
+    safe_steps_before_fork = max(1, steps_before_fork)
+    clamped_steps = max(0, min(growth_steps_since_fork, safe_steps_before_fork))
+
+    return clamped_steps / safe_steps_before_fork
