@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import cast
+from typing import cast, Mapping
 
 from py5 import lerp
 
@@ -88,12 +88,13 @@ class _AgentAnimator:
         self._pos_px = layout.vertices_by_key[from_key].px
 
     def update(
-        self,
-        now_ms: int,
-        agent: Agent,
-        layout: HexGridLayout,
-        graph: HoneyGraph,
-        stepper: GrowthStepper
+            self,
+            now_ms: int,
+            agent: Agent,
+            layout: HexGridLayout,
+            graph: HoneyGraph,
+            stepper: GrowthStepper,
+            agent_counts_by_vertex: Mapping[VertexKey, int],
     ) -> tuple[SpawnMove, ...]:
         """Advance animation and trigger discrete simulation steps when needed.
 
@@ -103,6 +104,7 @@ class _AgentAnimator:
             layout: Layout for vertex->pixel mapping.
             graph: Graph state.
             stepper: Discrete stepper that performs one logical move per call.
+            agent_counts_by_vertex: Snapshot of current agent counts by vertex.
 
         Returns:
             SpawnMove instructions created by the discrete step (empty if none).
@@ -111,7 +113,7 @@ class _AgentAnimator:
             return ()
 
         if self._phase == _AnimPhase.IDLE:
-            return self._start_next_move(now_ms, agent, layout, graph, stepper)
+            return self._start_next_move(now_ms, agent, layout, graph, stepper, agent_counts_by_vertex)
 
         if self._phase == _AnimPhase.MOVING:
             self._update_moving(now_ms, layout)
@@ -120,7 +122,7 @@ class _AgentAnimator:
         if self._phase == _AnimPhase.DWELLING:
             if now_ms < self._dwell_until_ms:
                 return ()
-            return self._start_next_move(now_ms, agent, layout, graph, stepper)
+            return self._start_next_move(now_ms, agent, layout, graph, stepper, agent_counts_by_vertex)
 
         return ()
 
@@ -154,12 +156,13 @@ class _AgentAnimator:
         self._dwell_until_ms = now_ms + self._dwell_ms_for_mode(self._last_mode)
 
     def _start_next_move(
-        self,
-        now_ms: int,
-        agent: Agent,
-        layout: HexGridLayout,
-        graph: HoneyGraph,
-        stepper: GrowthStepper
+            self,
+            now_ms: int,
+            agent: Agent,
+            layout: HexGridLayout,
+            graph: HoneyGraph,
+            stepper: GrowthStepper,
+            agent_counts_by_vertex: Mapping[VertexKey, int],
     ) -> tuple[SpawnMove, ...]:
         """Trigger exactly one discrete step and start animating it if it moved.
 
@@ -169,6 +172,7 @@ class _AgentAnimator:
             layout: Layout for pixel mapping.
             graph: Graph state.
             stepper: Discrete stepper.
+            agent_counts_by_vertex: Snapshot of current agent counts by vertex.
 
         Returns:
             SpawnMove instructions created by this discrete step (empty if none).
@@ -180,7 +184,7 @@ class _AgentAnimator:
         old_prev = agent.prev
         old_curr = agent.curr
 
-        spawns = stepper.step(agent, layout, graph)
+        spawns = stepper.step(agent, layout, graph, agent_counts_by_vertex)
         assert agent.prev is not None and agent.curr is not None
 
         self._last_mode = agent.mode
@@ -262,14 +266,42 @@ class AgentController:
             graph: Graph state.
         """
         pending_spawns: list[SpawnMove] = []
+        agent_counts_by_vertex = self._snapshot_agent_counts_by_vertex()
 
         for runtime in self._runtimes:
             pending_spawns.extend(
-                runtime.animator.update(now_ms, runtime.agent, layout, graph, self._stepper)
+                runtime.animator.update(
+                    now_ms,
+                    runtime.agent,
+                    layout,
+                    graph,
+                    self._stepper,
+                    agent_counts_by_vertex,
+                )
             )
 
         for spawn in pending_spawns:
             self._add_spawned_agent(spawn, now_ms, layout)
+
+    def _snapshot_agent_counts_by_vertex(self) -> dict[VertexKey, int]:
+        """Build a stable snapshot of current agent counts by simulation vertex.
+
+        Agents without an initialized current vertex are ignored. The snapshot is created
+        once per controller update to avoid order-dependent density checks.
+
+        Returns:
+            A dictionary mapping vertex keys to the number of agents currently located there.
+        """
+        counts_by_vertex: dict[VertexKey, int] = {}
+
+        for runtime in self._runtimes:
+            current_vertex = runtime.agent.curr
+            if current_vertex is None:
+                continue
+
+            counts_by_vertex[current_vertex] = counts_by_vertex.get(current_vertex, 0) + 1
+
+        return counts_by_vertex
 
     def _add_spawned_agent(self, spawn: SpawnMove, now_ms: int, layout: HexGridLayout) -> None:
         """Register a spawned agent and prime its animator for the already-applied move.

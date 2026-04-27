@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import math
+import random
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-import random
+from typing import Mapping
 
 from app.graph.honey_graph import HoneyGraph
 from app.grid.layout import HexGridLayout, VertexKey
@@ -30,6 +30,7 @@ class Agent:
 
     arrived_in_grow: bool = False
     fork_cooldown: int = 0
+    growth_steps_since_fork: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,37 +51,44 @@ class GrowthStepper:
     """Advance an agent by one decision using 'prefer new edge' and BFS-based travel."""
 
     def __init__(
-        self,
-        rng: random.Random,
-        prefer_new_probability: float = 0.85,
-        fork_growth_factor: float = 1.7,
-        fork_jitter: int = 1,
-        fork_cooldown_steps: int = 6,
-        min_first_fork_at: int = 4,
+            self,
+            rng: random.Random,
+            prefer_new_probability: float = 0.85,
+            fork_cooldown_steps: int = 2,
+            min_growth_steps_before_fork: int = 5,
+            fork_agent_exclusion_radius: int = 10,
+            max_nearby_agents_for_fork: int | None = 0,
     ) -> None:
         """Create a stepper.
 
         Args:
             rng: Random number generator.
             prefer_new_probability: Probability to choose the new edge when exactly one candidate is new.
-            fork_growth_factor: Multiplier for per-vertex next_fork_at after each fork.
-            fork_jitter: Random additive jitter applied to next_fork_at updates.
             fork_cooldown_steps: Per-agent cooldown after a fork to prevent rapid consecutive spawns.
-            min_first_fork_at: Lower bound for the initial next_fork_at value per vertex.
+            min_growth_steps_before_fork: Minimum number of growth-mode traversals an agent must perform before it may fork again.
+            fork_agent_exclusion_radius: Static graph-distance radius used to detect nearby agents before forking.
+            max_nearby_agents_for_fork: Maximum number of other agents allowed inside the exclusion radius.
+                If None, the density check is disabled.
         """
         self._rng = rng
         self._prefer_new_probability = max(0.0, min(1.0, prefer_new_probability))
 
-        self._fork_growth_factor = max(1.01, fork_growth_factor)
-        self._fork_jitter = max(0, fork_jitter)
         self._fork_cooldown_steps = max(0, fork_cooldown_steps)
-        self._min_first_fork_at = max(2, min_first_fork_at)
+        self._min_growth_steps_before_fork = max(1, min_growth_steps_before_fork)
+
+        self._fork_agent_exclusion_radius = max(0, fork_agent_exclusion_radius)
+        self._max_nearby_agents_for_fork = (
+            None
+            if max_nearby_agents_for_fork is None
+            else max(0, max_nearby_agents_for_fork)
+        )
 
     def step(
         self,
         agent: Agent,
         layout: HexGridLayout,
-        graph: HoneyGraph
+        graph: HoneyGraph,
+        agent_counts_by_vertex: Mapping[VertexKey, int] | None = None,
     ) -> tuple["SpawnMove", ...]:
         """Perform one simulation step and return any spawn moves.
 
@@ -88,12 +96,15 @@ class GrowthStepper:
             agent: Agent state to mutate.
             layout: Layout for pixel-based left/right ordering.
             graph: Graph state for edge existence, traffic, and frontier membership.
+            agent_counts_by_vertex: Snapshot of current agent counts by vertex.
 
         Returns:
             SpawnMove instructions for newly created agents, or an empty tuple if none were created.
         """
         if graph.frontier_is_empty():
             return ()
+
+        fork_density_snapshot = agent_counts_by_vertex if agent_counts_by_vertex is not None else {}
 
         if agent.fork_cooldown > 0:
             agent.fork_cooldown -= 1
@@ -103,7 +114,7 @@ class GrowthStepper:
             return ()
 
         if agent.mode == AgentMode.GROW:
-            spawns = self._step_grow(agent, layout, graph)
+            spawns = self._step_grow(agent, layout, graph, fork_density_snapshot)
             if spawns is not None:
                 return spawns
             self._enter_travel_mode(agent)
@@ -126,7 +137,8 @@ class GrowthStepper:
         self,
         agent: Agent,
         layout: HexGridLayout,
-        graph: HoneyGraph
+        graph: HoneyGraph,
+        agent_counts_by_vertex: Mapping[VertexKey, int],
     ) -> tuple["SpawnMove", ...] | None:
         """Try to perform one growth step and optionally fork.
 
@@ -134,6 +146,7 @@ class GrowthStepper:
             agent: Agent state to mutate.
             layout: Layout for pixel-based left/right ordering.
             graph: Graph state.
+            agent_counts_by_vertex: Snapshot of current agent counts by vertex.
 
         Returns:
             A tuple of SpawnMove instructions if a growth move was performed, or None if blocked.
@@ -150,10 +163,10 @@ class GrowthStepper:
             return None
 
         if (
-            len(candidates) == 2
-            and left is not None
-            and right is not None
-            and self._should_fork_here(agent, curr, left, right, graph)
+                len(candidates) == 2
+                and left is not None
+                and right is not None
+                and self._should_fork_here(agent, curr, left, right, graph, agent_counts_by_vertex)
         ):
             primary = self._choose_primary_for_fork(curr, left, right, graph)
             secondary = right if primary == left else left
@@ -164,6 +177,9 @@ class GrowthStepper:
             self._apply_grow_traverse(spawned_agent, from_vertex=curr, to_vertex=secondary, graph=graph)
 
             self._commit_vertex_fork(curr, graph)
+            self._reset_growth_age_after_fork(agent)
+            self._reset_growth_age_after_fork(spawned_agent)
+
             agent.fork_cooldown = self._fork_cooldown_steps
             spawned_agent.fork_cooldown = self._fork_cooldown_steps
 
@@ -176,7 +192,12 @@ class GrowthStepper:
         self._apply_grow_traverse(agent, from_vertex=curr, to_vertex=next_vertex, graph=graph)
         return ()
 
-    def _apply_grow_traverse(self, agent: Agent, from_vertex: VertexKey, to_vertex: VertexKey, graph: HoneyGraph) -> None:
+    @staticmethod
+    def _reset_growth_age_after_fork(agent: Agent) -> None:
+        agent.growth_steps_since_fork = 0
+
+    def _apply_grow_traverse(self, agent: Agent, from_vertex: VertexKey, to_vertex: VertexKey,
+                             graph: HoneyGraph) -> None:
         """Apply a traversal in growth mode and update all counters.
 
         Args:
@@ -192,10 +213,7 @@ class GrowthStepper:
         vs.visit_count += 1
         vs.grow_visit_count += 1
 
-        if vs.next_fork_at < self._min_first_fork_at:
-            # Initialize lazily for old graphs that do not set next_fork_at at creation time.
-            vs.next_fork_at = self._min_first_fork_at
-
+        agent.growth_steps_since_fork += 1
         agent.prev, agent.curr = from_vertex, to_vertex
         agent.mode = AgentMode.GROW
         agent.arrived_in_grow = True
@@ -370,20 +388,22 @@ class GrowthStepper:
         agent.travel_path.clear()
 
     def _should_fork_here(
-        self,
-        agent: Agent,
-        vertex: VertexKey,
-        left: VertexKey,
-        right: VertexKey,
-        graph: HoneyGraph
+            self,
+            agent: Agent,
+            vertex: VertexKey,
+            left: VertexKey,
+            right: VertexKey,
+            graph: HoneyGraph,
+            agent_counts_by_vertex: Mapping[VertexKey, int],
     ) -> bool:
         """Return whether a fork should be triggered at the given vertex.
 
         Rules:
           - Only on GROW arrival.
-          - Requires growth potential, meaning at least one forward edge is new.
-          - Uses per-vertex scheduling via next_fork_at driven by grow_visit_count.
+          - Requires two new forward branches.
+          - Requires enough growth-mode traversals by the agent since its last fork.
           - Respects per-agent cooldown to avoid rapid consecutive forks by the same agent.
+          - Requires the static graph neighborhood to be sparse enough.
 
         Args:
             agent: Current agent.
@@ -391,6 +411,7 @@ class GrowthStepper:
             left: Left forward option.
             right: Right forward option.
             graph: Graph state.
+            agent_counts_by_vertex: Snapshot of current agent counts by vertex.
 
         Returns:
             True if a fork should be triggered here, otherwise False.
@@ -399,56 +420,70 @@ class GrowthStepper:
             return False
         if agent.fork_cooldown > 0:
             return False
-
-        if not self._has_growth_potential(vertex, left, right, graph):
+        if agent.growth_steps_since_fork < self._min_growth_steps_before_fork:
+            return False
+        if not self._has_two_new_forward_edges(vertex, left, right, graph):
             return False
 
-        vs = graph.vertex_state(vertex)
-        if vs.grow_visit_count < vs.next_fork_at:
-            return False
+        return self._is_fork_neighborhood_sparse_enough(vertex, graph, agent_counts_by_vertex)
+
+    def _is_fork_neighborhood_sparse_enough(
+        self,
+        center: VertexKey,
+        graph: HoneyGraph,
+        agent_counts_by_vertex: Mapping[VertexKey, int],
+    ) -> bool:
+        """Check whether the static neighborhood around a vertex is sparse enough for forking.
+
+        The current agent at the center vertex is excluded from the count. Traversal uses
+        the static honeycomb topology, not only already existing simulation edges.
+
+        Args:
+            center: Center vertex of the density check.
+            graph: Graph state providing the static topology.
+            agent_counts_by_vertex: Snapshot of current agent counts by vertex.
+
+        Returns:
+            True if the configured density threshold allows a fork, otherwise False.
+        """
+        if self._max_nearby_agents_for_fork is None:
+            return True
+
+        nearby_agent_count = 0
+        visited: set[VertexKey] = {center}
+        open_queue: deque[tuple[VertexKey, int]] = deque([(center, 0)])
+
+        while open_queue:
+            vertex, distance = open_queue.popleft()
+
+            vertex_agent_count = agent_counts_by_vertex.get(vertex, 0)
+            if vertex == center and vertex_agent_count > 0:
+                vertex_agent_count -= 1
+
+            nearby_agent_count += vertex_agent_count
+            if nearby_agent_count > self._max_nearby_agents_for_fork:
+                return False
+
+            if distance >= self._fork_agent_exclusion_radius:
+                continue
+
+            for neighbor in graph.neighbors(vertex):
+                if neighbor in visited:
+                    continue
+
+                visited.add(neighbor)
+                open_queue.append((neighbor, distance + 1))
 
         return True
 
-    def _has_growth_potential(self, curr: VertexKey, left: VertexKey, right: VertexKey, graph: HoneyGraph) -> bool:
-        """Check whether forking can create at least one new edge.
-
-        Args:
-            curr: Current vertex.
-            left: Left candidate.
-            right: Right candidate.
-            graph: Graph state.
-
-        Returns:
-            True if at least one of the two forward edges does not yet exist.
-        """
-        return (not graph.edge_state(curr, left).exists) or (not graph.edge_state(curr, right).exists)
+    def _has_two_new_forward_edges(self, curr: VertexKey, left: VertexKey, right: VertexKey, graph: HoneyGraph) -> bool:
+        return (
+                not graph.edge_state(curr, left).exists
+                and not graph.edge_state(curr, right).exists
+        )
 
     def _commit_vertex_fork(self, vertex: VertexKey, graph: HoneyGraph) -> None:
-        """Update per-vertex scheduling state after a fork.
-
-        Args:
-            vertex: Vertex where the fork happened.
-            graph: Graph state to update.
-        """
-        vs = graph.vertex_state(vertex)
-        vs.fork_count += 1
-
-        base_next = max(vs.next_fork_at, self._min_first_fork_at)
-        grown = int(math.ceil(base_next * self._fork_growth_factor))
-        jitter = self._rng.randint(0, self._fork_jitter) if self._fork_jitter > 0 else 0
-        vs.next_fork_at = grown + jitter
-
-    # @staticmethod
-    # def _is_power_of_two_ge_2(value: int) -> bool:
-    #     """Return True if value is a power of two and >= 2.
-    #
-    #     Args:
-    #         value: Value to check.
-    #
-    #     Returns:
-    #         True if value is a power of two and >= 2, otherwise False.
-    #     """
-    #     return value >= 2 and (value & (value - 1)) == 0
+        graph.vertex_state(vertex).fork_count += 1
 
     def _choose_primary_for_fork(
         self,
